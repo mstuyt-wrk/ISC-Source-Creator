@@ -127,20 +127,16 @@ Credentials are supplied via a **Personal Access Token (PAT)**. To generate one:
 
 The `provision` command is the fastest way to populate a tenant with realistic demo data. It creates N Delimited File sources and automatically loads account and entitlement data into each one.
 
-#### What it does per source
+There are two account population modes:
 
-1. Fetches up to 250 identities from the tenant (excluding the admin alias you specify)
-2. Randomly samples **10 identities** as account data
-3. Randomly assigns **1–3 entitlements** from the catalogue to each account
-4. Creates the Delimited File source
-5. Reads the source's account and entitlement schemas from ISC to discover the exact column names required
-6. Builds account and entitlement CSVs that match those schemas exactly
-7. Uploads and triggers the **account aggregation**
-8. Uploads and triggers the **entitlement aggregation**
+| Mode | Flag | Behaviour |
+|---|---|---|
+| **Random** (default) | _(no flag)_ | Fetches up to 250 tenant identities, randomly samples 10 per source, assigns 1–3 entitlements to each |
+| **File** | `--users-file PATH` | Reads aliases from a text file — those users appear on **every** source, each receiving all 4 entitlements in a random order |
 
 #### Entitlement catalogue
 
-Every source gets the same four entitlements, randomly distributed across accounts:
+Both modes use the same four entitlements:
 
 | ID | Name | Description |
 |---|---|---|
@@ -148,6 +144,16 @@ Every source gets the same four entitlements, randomly distributed across accoun
 | `write` | Write | Write access |
 | `update` | Update | Update access |
 | `audit_view` | Audit View | Audit view access |
+
+#### What it does per source (both modes)
+
+1. Creates the Delimited File source
+2. Reads the source's account and entitlement schemas from ISC to discover the exact column names required
+3. Builds account and entitlement CSVs that match those schemas exactly
+4. Uploads and triggers the **account aggregation**
+5. Uploads and triggers the **entitlement aggregation**
+
+---
 
 #### Step 1 — Find a valid owner ID
 
@@ -161,19 +167,11 @@ python main.py find-owner "jane"
 python main.py find-owner "*"
 ```
 
-Example output:
-
-```
-Found 1 identity/identities matching 'jane':
-
-  ID                                    Name                                      Alias                           Email
-  ------------------------------------  ----------------------------------------  ------------------------------  ------------------------------
-  2c9180a46f3b1234567890abcdef1234      Jane Admin                                jadmin                          jane.admin@acme.com
-
-Copy the ID of the identity you want to use as source owner into your sources JSON file under owner.id
-```
+---
 
 #### Step 2 — Run provision
+
+**Random mode** — 10 different randomly sampled identities per source:
 
 ```bash
 python main.py provision \
@@ -183,7 +181,31 @@ python main.py provision \
   --exclude-alias spadmin
 ```
 
-This creates **Demo Source 1** through **Demo Source 5**, each loaded with 10 accounts and 4 entitlements.
+**File mode** — specific users on every source, all 4 entitlements each:
+
+First create a `users.txt` file with one alias per line:
+
+```
+jsmith
+adoe
+bjones
+mwilliams
+# blank lines and comments are ignored
+```
+
+Then run:
+
+```bash
+python main.py provision \
+  --count 5 \
+  --name "Demo Source" \
+  --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --users-file users.txt
+```
+
+This creates **Demo Source 1** through **Demo Source 5**. In file mode, all five sources contain the same users, each with all 4 entitlements assigned in a random order per user.
+
+---
 
 #### Provision options
 
@@ -191,12 +213,15 @@ This creates **Demo Source 1** through **Demo Source 5**, each loaded with 10 ac
 |---|---|---|
 | `--count N` | Yes | Number of sources to create |
 | `--name BASE_NAME` | Yes | Name prefix — sources are named `<BASE_NAME> 1`, `<BASE_NAME> 2`, etc. |
-| `--owner-id ID` | Yes | Identity ID of the source owner |
+| `--owner-id ID` | Yes | Identity ID of the source owner (use `find-owner` to look this up) |
 | `--owner-name NAME` | No | Display name of the owner (looked up automatically if omitted) |
-| `--exclude-alias ALIAS` | No | Alias of the admin account to exclude from account data |
+| `--users-file PATH` | No | Path to a plain-text file of aliases — enables file mode |
+| `--exclude-alias ALIAS` | No | Alias to exclude from the random pool (random mode only, ignored in file mode) |
 | `--force` | No | Delete any existing source with the same name before creating — use this to re-run with the same `--name` |
 | `--dry-run` | No | Preview CSVs and log what would happen without making any API calls |
 | `--output json` | No | Output results as JSON |
+
+---
 
 #### Re-running with the same name
 
@@ -207,11 +232,11 @@ python main.py provision \
   --count 5 \
   --name "Demo Source" \
   --owner-id 2c9180a46f3b1234567890abcdef1234 \
-  --exclude-alias spadmin \
+  --users-file users.txt \
   --force
 ```
 
-`--force` finds each existing source by exact name match, submits a delete task, waits for ISC to process it, then creates a fresh source in its place.
+---
 
 #### Dry run
 
@@ -222,8 +247,11 @@ python main.py provision \
   --count 2 \
   --name "Test" \
   --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --users-file users.txt \
   --dry-run
 ```
+
+---
 
 #### Example output
 
