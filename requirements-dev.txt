@@ -1,0 +1,4 @@
+# Development / testing dependencies
+-r requirements.txt
+pytest==8.3.5
+pytest-cov==5.0.0

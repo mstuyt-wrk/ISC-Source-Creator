@@ -1,0 +1,44 @@
+[
+  {
+    "name": "My Active Directory",
+    "description": "Corporate Active Directory source.",
+    "owner": {
+      "id": "REPLACE_WITH_IDENTITY_ID",
+      "name": "REPLACE_WITH_IDENTITY_NAME",
+      "type": "IDENTITY"
+    },
+    "connector": "REPLACE_WITH_CONNECTOR_SCRIPTNAME",
+    "connectorName": "Active Directory",
+    "connectionType": "direct",
+    "authoritative": false,
+    "deleteThreshold": 10
+  },
+  {
+    "name": "My CSV Feed",
+    "description": "Flat-file feed of employee records.",
+    "owner": {
+      "id": "REPLACE_WITH_IDENTITY_ID",
+      "name": "REPLACE_WITH_IDENTITY_NAME",
+      "type": "IDENTITY"
+    },
+    "connector": "REPLACE_WITH_CONNECTOR_SCRIPTNAME",
+    "connectorName": "Delimited File",
+    "connectionType": "file",
+    "authoritative": false,
+    "deleteThreshold": 5
+  },
+  {
+    "name": "My ServiceNow",
+    "description": "ServiceNow ITSM source.",
+    "owner": {
+      "id": "REPLACE_WITH_IDENTITY_ID",
+      "name": "REPLACE_WITH_IDENTITY_NAME",
+      "type": "IDENTITY"
+    },
+    "connector": "REPLACE_WITH_CONNECTOR_SCRIPTNAME",
+    "connectorName": "ServiceNow",
+    "connectionType": "direct",
+    "authoritative": false,
+    "deleteThreshold": 10
+  }
+]
