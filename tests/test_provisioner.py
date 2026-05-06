@@ -805,6 +805,8 @@ class TestCreateIdentityProfile(unittest.TestCase):
         self.client._access_token = "fake-token"
         import time as _time
         self.client._token_expires_at = _time.monotonic() + 600
+        # Default: no existing profiles so auto-priority resolves to 1
+        self.client.list_identity_profiles = MagicMock(return_value=[])
 
     def _mock_post(self, return_value, status_code=201):
         from unittest.mock import MagicMock, patch
@@ -824,6 +826,63 @@ class TestCreateIdentityProfile(unittest.TestCase):
                 owner_name="Owner",
             )
         self.assertEqual(result["id"], "profile-001")
+
+    def test_auto_resolves_priority_from_existing_profiles(self):
+        """Priority should be max(existing) + 1 when not supplied."""
+        existing = [{"id": "p1", "priority": 10}, {"id": "p2", "priority": 25}]
+        profile = {"id": "profile-new"}
+        with patch.object(self.client, "list_identity_profiles", return_value=existing):
+            with patch.object(self.client._session, "post") as mock_post:
+                resp = MagicMock()
+                resp.status_code = 201
+                resp.json.return_value = profile
+                mock_post.return_value = resp
+                self.client.create_identity_profile(
+                    name="HR Source",
+                    authoritative_source_id="src-hr",
+                    authoritative_source_name="HR Source",
+                    owner_id="owner-001",
+                    owner_name="Owner",
+                )
+                body = mock_post.call_args.kwargs["json"]
+        self.assertEqual(body["priority"], 26)
+
+    def test_priority_is_1_when_no_profiles_exist(self):
+        with patch.object(self.client, "list_identity_profiles", return_value=[]):
+            with patch.object(self.client._session, "post") as mock_post:
+                resp = MagicMock()
+                resp.status_code = 201
+                resp.json.return_value = {"id": "p1"}
+                mock_post.return_value = resp
+                self.client.create_identity_profile(
+                    name="HR Source",
+                    authoritative_source_id="src-hr",
+                    authoritative_source_name="HR Source",
+                    owner_id="owner-001",
+                    owner_name="Owner",
+                )
+                body = mock_post.call_args.kwargs["json"]
+        self.assertEqual(body["priority"], 1)
+
+    def test_explicit_priority_is_used_as_is(self):
+        with patch.object(self.client, "list_identity_profiles", return_value=[]) as mock_list:
+            with patch.object(self.client._session, "post") as mock_post:
+                resp = MagicMock()
+                resp.status_code = 201
+                resp.json.return_value = {"id": "p1"}
+                mock_post.return_value = resp
+                self.client.create_identity_profile(
+                    name="HR Source",
+                    authoritative_source_id="src-hr",
+                    authoritative_source_name="HR Source",
+                    owner_id="owner-001",
+                    owner_name="Owner",
+                    priority=99,
+                )
+                body = mock_post.call_args.kwargs["json"]
+        # list_identity_profiles should NOT have been called
+        mock_list.assert_not_called()
+        self.assertEqual(body["priority"], 99)
 
     def test_payload_contains_authoritative_source(self):
         profile = {"id": "profile-001"}
@@ -860,6 +919,7 @@ class TestCreateIdentityProfile(unittest.TestCase):
             body = mock_post.call_args.kwargs["json"]
         transforms = body["identityAttributeConfig"]["attributeTransforms"]
         mapped_attrs = {t["identityAttributeName"] for t in transforms}
+        self.assertIn("uid", mapped_attrs)
         self.assertIn("firstname", mapped_attrs)
         self.assertIn("lastname", mapped_attrs)
         self.assertIn("displayName", mapped_attrs)

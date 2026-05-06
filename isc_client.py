@@ -505,6 +505,44 @@ class ISCClient:
     # Identity Profiles API
     # ------------------------------------------------------------------
 
+    def list_identity_profiles(self, limit: int = 250) -> list[dict]:
+        """
+        List identity profiles on the tenant.
+
+        ``GET /v2024/identity-profiles``
+
+        Returns a list of identity profile objects, each containing at least
+        ``id``, ``name``, and ``priority``.
+        """
+        params: dict[str, Any] = {"limit": limit, "offset": 0}
+        logger.debug("Listing identity profiles")
+        url = f"{self._base_url}/v2024/identity-profiles"
+        response = self._session.get(url, headers=self._auth_headers(), params=params)
+        self._raise_for_status(response)
+        return response.json()
+
+    def _next_available_priority(self) -> int:
+        """
+        Return a priority value that is not already in use by any existing
+        identity profile.
+
+        Fetches all profiles, finds the highest priority in use, and returns
+        that value + 1.  Falls back to 1 if no profiles exist yet.
+        """
+        try:
+            profiles = self.list_identity_profiles()
+            if not profiles:
+                return 1
+            used = {p.get("priority", 0) for p in profiles if p.get("priority") is not None}
+            return max(used) + 1
+        except ISCAPIError as exc:
+            logger.warning(
+                "Could not fetch identity profiles to determine priority (%s). "
+                "Falling back to priority=1.",
+                exc.detail(),
+            )
+            return 1
+
     def create_identity_profile(
         self,
         name: str,
@@ -513,7 +551,7 @@ class ISCClient:
         owner_id: str,
         owner_name: str,
         attribute_transforms: Optional[list[dict]] = None,
-        priority: int = 25,
+        priority: Optional[int] = None,
     ) -> dict:
         """
         Create an identity profile tied to an authoritative source.
@@ -527,6 +565,7 @@ class ISCClient:
         ==================  ========================
         Identity attribute  Source account attribute
         ==================  ========================
+        uid                 name
         firstname           givenName
         lastname            familyName
         displayName         name
@@ -545,16 +584,26 @@ class ISCClient:
             owner_id:                   Identity ID of the profile owner.
             owner_name:                 Display name of the profile owner.
             attribute_transforms:       Optional list of attribute-transform
-                                        objects.  Defaults to the four standard
+                                        objects.  Defaults to the five standard
                                         mappings described above.
-            priority:                   Profile priority (default 25).
+            priority:                   Profile priority. If omitted (default),
+                                        the next available priority is resolved
+                                        automatically by querying existing
+                                        profiles.
 
         Returns:
             The created identity profile object returned by the API.
         """
+        if priority is None:
+            priority = self._next_available_priority()
+            logger.debug("Auto-resolved identity profile priority: %d", priority)
+
         if attribute_transforms is None:
-            # Standard four-field mapping for a Delimited File authoritative source
+            # Standard mappings for a Delimited File authoritative source.
+            # uid maps to the account's 'name' column, which holds the full
+            # display name populated from the CSV fullName field.
             _field_map = [
+                ("uid",          "name"),
                 ("firstname",    "givenName"),
                 ("lastname",     "familyName"),
                 ("displayName",  "name"),
@@ -596,8 +645,8 @@ class ISCClient:
         }
 
         logger.debug(
-            "Creating identity profile '%s' for source '%s'",
-            name, authoritative_source_name,
+            "Creating identity profile '%s' for source '%s' (priority=%d)",
+            name, authoritative_source_name, priority,
         )
         # Identity Profiles lives under /v2024, not /v3
         url = f"{self._base_url}/v2024/identity-profiles"

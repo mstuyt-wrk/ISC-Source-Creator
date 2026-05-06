@@ -260,6 +260,7 @@ The identity profile created in authoritative mode maps source account attribute
 
 | ISC identity attribute | Source account attribute |
 |---|---|
+| `uid` | `name` (populated from CSV `fullName`) |
 | `firstname` | `givenName` (populated from CSV `firstName`) |
 | `lastname` | `familyName` (populated from CSV `lastName`) |
 | `displayName` | `name` (populated from CSV `fullName`) |
