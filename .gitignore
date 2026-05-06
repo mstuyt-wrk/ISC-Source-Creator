@@ -1,1 +1,8 @@
 .DS_Store
+.env
+.venv/
+__pycache__/
+.pytest_cache
+tests/__pycache__/
+tests/__pycache__/test_provisioner.cpython-311-pytest-8.3.5.pyc
+tests/__pycache__/test_provisioner.cpython-311-pytest-8.3.5.pyc

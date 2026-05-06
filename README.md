@@ -7,6 +7,7 @@ A Python CLI tool for creating and managing sources in **SailPoint Identity Secu
 | Feature | Detail |
 |---|---|
 | **Provision** | Create N Delimited File sources, auto-populate with real tenant identities, and aggregate account + entitlement data in one command |
+| **Authoritative sources** | Provision sources as authoritative and automatically create a linked identity profile with attribute mappings |
 | **Create** | Bulk-create sources from a JSON definition file |
 | **List** | List sources with filtering, sorting, and auto-pagination |
 | **Get** | Fetch a single source by ID |
@@ -43,6 +44,8 @@ sailpoint-source-creator/
 - Python 3.10+
 - A SailPoint ISC tenant (production or demo)
 - A **Personal Access Token (PAT)** or OAuth API client with `ORG_ADMIN` or `SOURCE_ADMIN` authority
+
+> Creating authoritative sources and identity profiles requires `ORG_ADMIN` authority.
 
 ## Setup
 
@@ -119,7 +122,7 @@ Credentials are supplied via a **Personal Access Token (PAT)**. To generate one:
 3. Click **New Token**, give it a name, and click **Create Token**.
 4. Copy both the **Client ID** and **Client Secret** — the secret is only shown once.
 
-> The authority of the PAT matches the authority of the user who created it. You need at least `SOURCE_ADMIN` to create sources, and `ORG_ADMIN` to delete them.
+> The authority of the PAT matches the authority of the user who created it. You need at least `SOURCE_ADMIN` to create sources, `ORG_ADMIN` to delete them, and `ORG_ADMIN` to create identity profiles.
 
 ---
 
@@ -129,16 +132,17 @@ Credentials are supplied via a **Personal Access Token (PAT)**. To generate one:
 
 The `provision` command is the fastest way to populate a tenant with realistic demo data. It creates N Delimited File sources and automatically loads account and entitlement data into each one.
 
-There are two account population modes:
+There are three account population modes:
 
 | Mode | Flag | Behaviour |
 |---|---|---|
 | **Random** (default) | _(no flag)_ | Fetches up to 250 tenant identities, randomly samples 10 per source, assigns 1–3 entitlements to each |
-| **File** | `--users-file PATH` | Reads aliases from a text file — those users appear on **every** source, each receiving all 4 entitlements in a random order |
+| **File** | `--users-file PATH` | Reads aliases from a plain-text file — those users appear on **every** source, each receiving all 4 entitlements in a random order |
+| **Authoritative** | `--authoritative --users-file PATH` | Same as file mode but sources are marked authoritative and an identity profile is created for each one. The file must be a CSV with identity fields (see below). |
 
 #### Entitlement catalogue
 
-Both modes use the same four entitlements:
+All modes use the same four entitlements:
 
 | ID | Name | Description |
 |---|---|---|
@@ -147,13 +151,17 @@ Both modes use the same four entitlements:
 | `update` | Update | Update access |
 | `audit_view` | Audit View | Audit view access |
 
-#### What it does per source (both modes)
+#### What it does per source (all modes)
 
 1. Creates the Delimited File source
 2. Reads the source's account and entitlement schemas from ISC to discover the exact column names required
 3. Builds account and entitlement CSVs that match those schemas exactly
 4. Uploads and triggers the **account aggregation**
 5. Uploads and triggers the **entitlement aggregation**
+
+In authoritative mode, an additional step runs between source creation and aggregation:
+
+- Creates an **identity profile** linked to the source, with attribute transforms mapping `firstName → firstname`, `lastName → lastname`, `fullName → displayName`, and `email → email`
 
 ---
 
@@ -205,7 +213,57 @@ python main.py provision \
   --users-file users.txt
 ```
 
-This creates **Demo Source 1** through **Demo Source 5**. In file mode, all five sources contain the same users, each with all 4 entitlements assigned in a random order per user.
+**Authoritative mode** — creates authoritative sources with a linked identity profile:
+
+First create a `employees.csv` file with the required columns:
+
+```csv
+firstName,lastName,fullName,email
+Jane,Doe,Jane Doe,jane.doe@acme.com
+John,Smith,John Smith,john.smith@acme.com
+Alice,Jones,Alice Jones,alice.jones@acme.com
+```
+
+Then run:
+
+```bash
+python main.py provision \
+  --count 3 \
+  --name "HR Source" \
+  --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --users-file employees.csv \
+  --authoritative
+```
+
+This creates **HR Source 1** through **HR Source 3**, each marked as authoritative, with an identity profile automatically created and linked to each source.
+
+---
+
+#### Authoritative CSV format
+
+When using `--authoritative`, `--users-file` must point to a CSV file. Plain-text alias files are not accepted in this mode.
+
+| Column | Required | Description |
+|---|---|---|
+| `firstName` | Yes | User's first name |
+| `lastName` | Yes | User's last name |
+| `fullName` | Yes | User's display name |
+| `email` | Yes | User's email address — also used to derive the account alias |
+
+Column headers are case-insensitive (`FIRSTNAME`, `firstname`, and `firstName` all work). Additional columns are allowed and ignored.
+
+The account alias is derived from the email local-part (the part before `@`). For example, `jane.doe@acme.com` becomes the alias `jane.doe`.
+
+#### Identity profile attribute mappings
+
+The identity profile created in authoritative mode maps source account attributes to ISC identity attributes as follows:
+
+| ISC identity attribute | Source account attribute |
+|---|---|
+| `firstname` | `givenName` (populated from CSV `firstName`) |
+| `lastname` | `familyName` (populated from CSV `lastName`) |
+| `displayName` | `name` (populated from CSV `fullName`) |
+| `email` | `e-mail` (populated from CSV `email`) |
 
 ---
 
@@ -217,8 +275,9 @@ This creates **Demo Source 1** through **Demo Source 5**. In file mode, all five
 | `--name BASE_NAME` | Yes | Name prefix — sources are named `<BASE_NAME> 1`, `<BASE_NAME> 2`, etc. |
 | `--owner-id ID` | Yes | Identity ID of the source owner (use `find-owner` to look this up) |
 | `--owner-name NAME` | No | Display name of the owner (looked up automatically if omitted) |
-| `--users-file PATH` | No | Path to a plain-text file of aliases — enables file mode |
-| `--exclude-alias ALIAS` | No | Alias to exclude from the random pool (random mode only, ignored in file mode) |
+| `--users-file PATH` | No* | Path to a users file. Plain-text aliases for file mode; CSV with identity fields for authoritative mode. *Required when `--authoritative` is set. |
+| `--authoritative` | No | Create authoritative sources and generate an identity profile for each one. Requires `--users-file` to be a CSV with `firstName`, `lastName`, `fullName`, `email` columns. Requires `ORG_ADMIN`. |
+| `--exclude-alias ALIAS` | No | Alias to exclude from the random pool (random mode only, ignored in file/authoritative mode) |
 | `--force` | No | Delete any existing source with the same name before creating — use this to re-run with the same `--name` |
 | `--dry-run` | No | Preview CSVs and log what would happen without making any API calls |
 | `--output json` | No | Output results as JSON |
@@ -232,9 +291,10 @@ If sources with the same name already exist on the tenant, the create step will 
 ```bash
 python main.py provision \
   --count 5 \
-  --name "Demo Source" \
+  --name "HR Source" \
   --owner-id 2c9180a46f3b1234567890abcdef1234 \
-  --users-file users.txt \
+  --users-file employees.csv \
+  --authoritative \
   --force
 ```
 
@@ -249,23 +309,51 @@ python main.py provision \
   --count 2 \
   --name "Test" \
   --owner-id 2c9180a46f3b1234567890abcdef1234 \
-  --users-file users.txt \
+  --users-file employees.csv \
+  --authoritative \
   --dry-run
 ```
 
 ---
 
-#### Example output
+#### Example output (authoritative mode)
+
+```
+────────────────────────────────────────────────────────────
+Provisioning source 1/3: HR Source 1
+  ✓ Source created  id=34db381d97944bdc89fa3eed326f6f1  authoritative=True
+  ✓ Identity profile created  id=7ac2190f3e8b4d12a09f1cc234de5678
+  ✓ Account aggregation started  task=task-acct-001
+  ✓ Entitlement aggregation started  task=task-ent-001
+────────────────────────────────────────────────────────────
+Provisioning source 2/3: HR Source 2
+  ✓ Source created  id=f4bd61c6ad7b49e68da22c9fde4f47b1  authoritative=True
+  ✓ Identity profile created  id=9de3401a2f7c5e23b10g2dd345ef6789
+  ✓ Account aggregation started  task=task-acct-002
+  ✓ Entitlement aggregation started  task=task-ent-002
+...
+
+======================================================================
+  Provision Summary: 3/3 sources fully provisioned
+======================================================================
+
+✓ Provisioned successfully:
+    HR Source 1                               id=34db381d97944bdc89fa3eed326f6f1  accounts=3  entitlements=4
+    HR Source 2                               id=f4bd61c6ad7b49e68da22c9fde4f47b1  accounts=3  entitlements=4
+    HR Source 3                               id=3e42d84d94dd4303a77ad7211bed01a1  accounts=3  entitlements=4
+```
+
+#### Example output (random / file mode)
 
 ```
 ────────────────────────────────────────────────────────────
 Provisioning source 1/5: Demo Source 1
-  ✓ Source created  id=34db381d97944bdc89fa3eed326f6f1
+  ✓ Source created  id=34db381d97944bdc89fa3eed326f6f1  authoritative=False
   ✓ Account aggregation started  task=task-acct-001
   ✓ Entitlement aggregation started  task=task-ent-001
 ────────────────────────────────────────────────────────────
 Provisioning source 2/5: Demo Source 2
-  ✓ Source created  id=f4bd61c6ad7b49e68da22c9fde4f47b1
+  ✓ Source created  id=f4bd61c6ad7b49e68da22c9fde4f47b1  authoritative=False
   ✓ Account aggregation started  task=task-acct-002
   ✓ Entitlement aggregation started  task=task-ent-002
 ...
@@ -456,5 +544,6 @@ python -m pytest tests/ -v --cov=. --cov-report=term-missing
 ## API reference
 
 - [v2026 Sources API](https://developer.sailpoint.com/docs/api/v2026/sources)
+- [v2024 Identity Profiles API](https://developer.sailpoint.com/docs/api/v2024/identity-profiles)
 - [Authentication](https://developer.sailpoint.com/docs/api/authentication)
 - [ISC API Standard Collection Parameters](https://developer.sailpoint.com/idn/api/standard-collection-parameters)

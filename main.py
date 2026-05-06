@@ -166,6 +166,14 @@ def cmd_provision(args: argparse.Namespace, client: ISCClient) -> int:
         else:
             logger.info("Resolved owner: %s (%s)", owner_name, args.owner_id)
 
+    if args.authoritative and args.count != 1:
+        logger.error(
+            "--authoritative only supports --count 1. "
+            "An authoritative source represents a single system of record — "
+            "creating multiple from the same file is not allowed."
+        )
+        return 1
+
     logger.info(
         "Provisioning %d source(s) with base name '%s', owner: %s (%s)",
         args.count, args.name, owner_name, args.owner_id,
@@ -182,6 +190,7 @@ def cmd_provision(args: argparse.Namespace, client: ISCClient) -> int:
         owner_name=owner_name,
         exclude_alias=args.exclude_alias,
         users_file=args.users_file,
+        authoritative=args.authoritative,
         dry_run=args.dry_run,
         force=args.force,
     )
@@ -508,6 +517,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME",
         help="Display name of the owner (looked up automatically if omitted).",
+    )
+    prov_p.add_argument(
+        "--authoritative",
+        action="store_true",
+        help=(
+            "Create authoritative sources and automatically generate an identity "
+            "profile for each one. Requires --users-file to be a CSV with columns: "
+            "firstName, lastName, fullName, email."
+        ),
     )
     prov_p.add_argument(
         "--users-file",

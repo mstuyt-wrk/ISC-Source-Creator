@@ -23,9 +23,11 @@ from provisioner import (
     _aliases_to_identity_dicts,
     _assign_entitlements_file_mode,
     _assign_entitlements_random,
+    _authoritative_rows_to_identity_dicts,
     _build_account_csv,
     _build_entitlement_csv,
     fetch_identity_pool,
+    load_authoritative_csv,
     load_users_file,
     provision_sources,
 )
@@ -531,6 +533,371 @@ class TestProvisionSources(unittest.TestCase):
             )
 
         self.assertEqual(summary.succeeded[0].accounts_loaded, 5)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# load_authoritative_csv
+# ---------------------------------------------------------------------------
+
+class TestLoadAuthoritativeCsv(unittest.TestCase):
+    def _write_csv(self, content: str) -> str:
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        return path
+
+    def test_loads_valid_csv(self):
+        path = self._write_csv(
+            "firstName,lastName,fullName,email\n"
+            "Jane,Doe,Jane Doe,jane.doe@example.com\n"
+            "John,Smith,John Smith,john.smith@example.com\n"
+        )
+        rows = load_authoritative_csv(path)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["firstName"], "Jane")
+        self.assertEqual(rows[0]["email"], "jane.doe@example.com")
+
+    def test_case_insensitive_headers(self):
+        path = self._write_csv(
+            "FIRSTNAME,LASTNAME,FULLNAME,EMAIL\n"
+            "Jane,Doe,Jane Doe,jane@example.com\n"
+        )
+        rows = load_authoritative_csv(path)
+        self.assertEqual(len(rows), 1)
+
+    def test_raises_on_missing_required_column(self):
+        path = self._write_csv(
+            "firstName,lastName,email\n"
+            "Jane,Doe,jane@example.com\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            load_authoritative_csv(path)
+        self.assertIn("fullname", str(ctx.exception).lower())
+
+    def test_raises_file_not_found(self):
+        with self.assertRaises(FileNotFoundError):
+            load_authoritative_csv("/nonexistent/users.csv")
+
+    def test_raises_on_empty_data(self):
+        path = self._write_csv("firstName,lastName,fullName,email\n")
+        with self.assertRaises(ValueError) as ctx:
+            load_authoritative_csv(path)
+        self.assertIn("no data rows", str(ctx.exception))
+
+    def test_skips_blank_rows(self):
+        path = self._write_csv(
+            "firstName,lastName,fullName,email\n"
+            "Jane,Doe,Jane Doe,jane@example.com\n"
+            ",,, \n"
+            "John,Smith,John Smith,john@example.com\n"
+        )
+        rows = load_authoritative_csv(path)
+        self.assertEqual(len(rows), 2)
+
+    def test_extra_columns_allowed(self):
+        path = self._write_csv(
+            "firstName,lastName,fullName,email,department\n"
+            "Jane,Doe,Jane Doe,jane@example.com,Engineering\n"
+        )
+        rows = load_authoritative_csv(path)
+        self.assertEqual(rows[0]["department"], "Engineering")
+
+
+# ---------------------------------------------------------------------------
+# _authoritative_rows_to_identity_dicts
+# ---------------------------------------------------------------------------
+
+class TestAuthoritativeRowsToIdentityDicts(unittest.TestCase):
+    def _make_rows(self):
+        return [
+            {"firstName": "Jane", "lastName": "Doe",
+             "fullName": "Jane Doe", "email": "jane.doe@example.com"},
+            {"firstName": "John", "lastName": "Smith",
+             "fullName": "John Smith", "email": "john.smith@example.com"},
+        ]
+
+    def test_alias_derived_from_email_local_part(self):
+        dicts = _authoritative_rows_to_identity_dicts(self._make_rows())
+        self.assertEqual(dicts[0]["alias"], "jane.doe")
+        self.assertEqual(dicts[1]["alias"], "john.smith")
+
+    def test_name_set_to_fullname(self):
+        dicts = _authoritative_rows_to_identity_dicts(self._make_rows())
+        self.assertEqual(dicts[0]["name"], "Jane Doe")
+
+    def test_firstname_and_lastname_preserved(self):
+        dicts = _authoritative_rows_to_identity_dicts(self._make_rows())
+        self.assertEqual(dicts[0]["firstName"], "Jane")
+        self.assertEqual(dicts[0]["lastName"], "Doe")
+
+    def test_email_preserved(self):
+        dicts = _authoritative_rows_to_identity_dicts(self._make_rows())
+        self.assertEqual(dicts[0]["email"], "jane.doe@example.com")
+
+    def test_fallback_alias_when_no_email(self):
+        rows = [{"firstName": "Jane", "lastName": "Doe",
+                 "fullName": "Jane Doe", "email": ""}]
+        dicts = _authoritative_rows_to_identity_dicts(rows)
+        self.assertEqual(dicts[0]["alias"], "jane.doe")
+
+    def test_case_insensitive_column_lookup(self):
+        rows = [{"FIRSTNAME": "Jane", "LASTNAME": "Doe",
+                 "FULLNAME": "Jane Doe", "EMAIL": "jane@example.com"}]
+        dicts = _authoritative_rows_to_identity_dicts(rows)
+        self.assertEqual(dicts[0]["firstName"], "Jane")
+        self.assertEqual(dicts[0]["email"], "jane@example.com")
+
+
+# ---------------------------------------------------------------------------
+# provision_sources — authoritative mode
+# ---------------------------------------------------------------------------
+
+class TestProvisionSourcesAuthoritative(unittest.TestCase):
+    def _make_csv(self, rows: list[tuple]) -> str:
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        with os.fdopen(fd, "w") as f:
+            f.write("firstName,lastName,fullName,email\n")
+            for row in rows:
+                f.write(",".join(row) + "\n")
+        return path
+
+    def setUp(self):
+        client = _make_client()
+        client.list_identities = MagicMock(return_value=_make_pool(20))
+        client.create_source = MagicMock(return_value={"id": "src-auth-001"})
+        client.create_identity_profile = MagicMock(return_value={"id": "profile-001"})
+        client.import_accounts = MagicMock(return_value={"id": "task-acct-001"})
+        client.import_entitlements = MagicMock(return_value={"id": "task-ent-001"})
+        self.client = client
+
+    def test_authoritative_flag_sets_source_payload(self):
+        path = self._make_csv([
+            ("Jane", "Doe", "Jane Doe", "jane@example.com"),
+            ("John", "Smith", "John Smith", "john@example.com"),
+        ])
+        with patch("provisioner.time.sleep"):
+            provision_sources(
+                self.client, count=1, base_name="Auth Source",
+                owner_id="owner-id", owner_name="Owner",
+                users_file=path, authoritative=True,
+            )
+        payload = self.client.create_source.call_args[0][0]
+        self.assertTrue(payload["authoritative"])
+
+    def test_identity_profile_created_for_authoritative_source(self):
+        path = self._make_csv([
+            ("Jane", "Doe", "Jane Doe", "jane@example.com"),
+        ])
+        with patch("provisioner.time.sleep"):
+            summary = provision_sources(
+                self.client, count=1, base_name="Auth Source",
+                owner_id="owner-id", owner_name="Owner",
+                users_file=path, authoritative=True,
+            )
+        self.assertEqual(self.client.create_identity_profile.call_count, 1)
+        self.assertEqual(len(summary.succeeded), 1)
+
+    def test_identity_profile_not_created_when_not_authoritative(self):
+        path = self._make_csv([
+            ("Jane", "Doe", "Jane Doe", "jane@example.com"),
+        ])
+        with patch("provisioner.time.sleep"):
+            provision_sources(
+                self.client, count=1, base_name="Non-Auth",
+                owner_id="owner-id", owner_name="Owner",
+                users_file=path, authoritative=False,
+            )
+        self.client.create_identity_profile.assert_not_called()
+
+    def test_authoritative_without_users_file_fails_all(self):
+        summary = provision_sources(
+            self.client, count=2, base_name="Auth",
+            owner_id="owner-id", owner_name="Owner",
+            authoritative=True,  # no users_file
+        )
+        self.assertEqual(len(summary.failed), 2)
+        self.client.create_source.assert_not_called()
+        self.assertIn("users-file", summary.failed[0].error)
+
+    def test_authoritative_count_greater_than_one_fails(self):
+        path = self._make_csv([
+            ("Jane", "Doe", "Jane Doe", "jane@example.com"),
+        ])
+        summary = provision_sources(
+            self.client, count=3, base_name="Auth",
+            owner_id="owner-id", owner_name="Owner",
+            users_file=path, authoritative=True,
+        )
+        self.assertEqual(len(summary.failed), 3)
+        self.client.create_source.assert_not_called()
+        self.assertIn("count=1", summary.failed[0].error)
+
+    def test_identity_profile_failure_records_source_as_failed(self):
+        path = self._make_csv([
+            ("Jane", "Doe", "Jane Doe", "jane@example.com"),
+        ])
+        err = ISCAPIError(403, "forbidden", body={"message": "ORG_ADMIN required"})
+        self.client.create_identity_profile = MagicMock(side_effect=err)
+        with patch("provisioner.time.sleep"):
+            summary = provision_sources(
+                self.client, count=1, base_name="Auth",
+                owner_id="owner-id", owner_name="Owner",
+                users_file=path, authoritative=True,
+            )
+        self.assertEqual(len(summary.failed), 1)
+        self.assertIn("Identity profile", summary.failed[0].error)
+        # Aggregation should not have been attempted
+        self.client.import_accounts.assert_not_called()
+
+    def test_dry_run_authoritative_makes_no_api_calls(self):
+        path = self._make_csv([
+            ("Jane", "Doe", "Jane Doe", "jane@example.com"),
+        ])
+        summary = provision_sources(
+            self.client, count=1, base_name="Auth",
+            owner_id="owner-id", owner_name="Owner",
+            users_file=path, authoritative=True, dry_run=True,
+        )
+        self.client.create_source.assert_not_called()
+        self.client.create_identity_profile.assert_not_called()
+        self.client.import_accounts.assert_not_called()
+        self.assertEqual(len(summary.succeeded), 1)
+
+    def test_account_csv_contains_full_name_and_email(self):
+        """CSV rows should carry firstName/lastName/email into the account CSV."""
+        path = self._make_csv([
+            ("Jane", "Doe", "Jane Doe", "jane.doe@example.com"),
+            ("John", "Smith", "John Smith", "john.smith@example.com"),
+        ])
+        captured: list[bytes] = []
+
+        def capture(source_id, csv_bytes, **kwargs):
+            captured.append(csv_bytes)
+            return {"id": "task-001"}
+
+        self.client.import_accounts = MagicMock(side_effect=capture)
+        with patch("provisioner.time.sleep"):
+            provision_sources(
+                self.client, count=1, base_name="Auth",
+                owner_id="owner-id", owner_name="Owner",
+                users_file=path, authoritative=True,
+            )
+
+        self.assertEqual(len(captured), 1)
+        text = captured[0].decode()
+        self.assertIn("Jane", text)
+        self.assertIn("Doe", text)
+        self.assertIn("jane.doe", text)  # alias derived from email
+
+
+# ---------------------------------------------------------------------------
+# isc_client — create_identity_profile
+# ---------------------------------------------------------------------------
+
+class TestCreateIdentityProfile(unittest.TestCase):
+    def setUp(self):
+        from isc_client import ISCClient
+        self.client = ISCClient("tenant", "cid", "csec")
+        self.client._access_token = "fake-token"
+        import time as _time
+        self.client._token_expires_at = _time.monotonic() + 600
+
+    def _mock_post(self, return_value, status_code=201):
+        from unittest.mock import MagicMock, patch
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = return_value
+        return patch.object(self.client._session, "post", return_value=resp)
+
+    def test_returns_created_profile(self):
+        profile = {"id": "profile-001", "name": "My Source"}
+        with self._mock_post(profile):
+            result = self.client.create_identity_profile(
+                name="My Source",
+                authoritative_source_id="src-001",
+                authoritative_source_name="My Source",
+                owner_id="owner-001",
+                owner_name="Owner",
+            )
+        self.assertEqual(result["id"], "profile-001")
+
+    def test_payload_contains_authoritative_source(self):
+        profile = {"id": "profile-001"}
+        with patch.object(self.client._session, "post") as mock_post:
+            resp = MagicMock()
+            resp.status_code = 201
+            resp.json.return_value = profile
+            mock_post.return_value = resp
+            self.client.create_identity_profile(
+                name="HR Source",
+                authoritative_source_id="src-hr",
+                authoritative_source_name="HR Source",
+                owner_id="owner-001",
+                owner_name="Owner",
+            )
+            body = mock_post.call_args.kwargs["json"]
+        self.assertEqual(body["authoritativeSource"]["id"], "src-hr")
+        self.assertEqual(body["authoritativeSource"]["type"], "SOURCE")
+
+    def test_default_attribute_transforms_cover_four_fields(self):
+        profile = {"id": "profile-001"}
+        with patch.object(self.client._session, "post") as mock_post:
+            resp = MagicMock()
+            resp.status_code = 201
+            resp.json.return_value = profile
+            mock_post.return_value = resp
+            self.client.create_identity_profile(
+                name="HR Source",
+                authoritative_source_id="src-hr",
+                authoritative_source_name="HR Source",
+                owner_id="owner-001",
+                owner_name="Owner",
+            )
+            body = mock_post.call_args.kwargs["json"]
+        transforms = body["identityAttributeConfig"]["attributeTransforms"]
+        mapped_attrs = {t["identityAttributeName"] for t in transforms}
+        self.assertIn("firstname", mapped_attrs)
+        self.assertIn("lastname", mapped_attrs)
+        self.assertIn("displayName", mapped_attrs)
+        self.assertIn("email", mapped_attrs)
+
+    def test_uses_v2024_endpoint(self):
+        profile = {"id": "profile-001"}
+        with patch.object(self.client._session, "post") as mock_post:
+            resp = MagicMock()
+            resp.status_code = 201
+            resp.json.return_value = profile
+            mock_post.return_value = resp
+            self.client.create_identity_profile(
+                name="HR Source",
+                authoritative_source_id="src-hr",
+                authoritative_source_name="HR Source",
+                owner_id="owner-001",
+                owner_name="Owner",
+            )
+            url = mock_post.call_args.args[0]
+        self.assertIn("/v2024/identity-profiles", url)
+
+    def test_raises_on_api_error(self):
+        from isc_client import ISCAPIError
+        bad_resp = MagicMock()
+        bad_resp.status_code = 403
+        bad_resp.url = "https://tenant.api.identitynow.com/v2024/identity-profiles"
+        bad_resp.json.return_value = {"message": "ORG_ADMIN required"}
+        with patch.object(self.client._session, "post", return_value=bad_resp):
+            with self.assertRaises(ISCAPIError) as ctx:
+                self.client.create_identity_profile(
+                    name="HR Source",
+                    authoritative_source_id="src-hr",
+                    authoritative_source_name="HR Source",
+                    owner_id="owner-001",
+                    owner_name="Owner",
+                )
+        self.assertEqual(ctx.exception.status_code, 403)
 
 
 if __name__ == "__main__":

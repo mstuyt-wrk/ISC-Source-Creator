@@ -25,6 +25,25 @@ users.txt format
         # this is a comment
         bjones
 
+Authoritative sources  (--authoritative)
+-----------------------------------------
+When --authoritative is set the source is created with ``authoritative=True``
+and an identity profile is automatically created and linked to it.
+
+The CSV supplied via --users-file (required in this mode) must contain the
+following columns:
+
+    firstName, lastName, fullName, email
+
+These are mapped to ISC identity attributes via the identity profile's
+attribute-transform configuration:
+
+    ISC attribute   ←  source account attribute
+    firstname       ←  givenName   (populated from CSV firstName column)
+    lastname        ←  familyName  (populated from CSV lastName column)
+    displayName     ←  name        (populated from CSV fullName column)
+    email           ←  e-mail      (populated from CSV email column)
+
 CSV schemas
 -----------
 Account columns (auto-discovered from source schema, falls back to ISC defaults):
@@ -148,6 +167,101 @@ def load_users_file(path: str) -> list[str]:
         )
 
     return aliases
+
+
+# Required columns for the authoritative CSV (case-insensitive header match)
+_AUTHORITATIVE_REQUIRED_COLUMNS = {"firstname", "lastname", "fullname", "email"}
+
+
+def load_authoritative_csv(path: str) -> list[dict]:
+    """
+    Load a CSV file of user records for authoritative source provisioning.
+
+    The CSV must contain at minimum the following columns (case-insensitive):
+
+        firstName, lastName, fullName, email
+
+    Additional columns are allowed and passed through unchanged.
+
+    Args:
+        path: Path to the CSV file.
+
+    Returns:
+        List of row dicts with normalised keys (original case preserved).
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If required columns are missing or the file has no data rows.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Authoritative CSV file not found: {path}")
+
+    with file_path.open("r", encoding="utf-8-sig", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames is None:
+            raise ValueError(f"CSV file '{path}' appears to be empty.")
+
+        # Validate required columns (case-insensitive)
+        header_lower = {col.strip().lower() for col in reader.fieldnames}
+        missing = _AUTHORITATIVE_REQUIRED_COLUMNS - header_lower
+        if missing:
+            raise ValueError(
+                f"Authoritative CSV '{path}' is missing required column(s): "
+                f"{', '.join(sorted(missing))}. "
+                f"Required: firstName, lastName, fullName, email."
+            )
+
+        rows = [
+            {k.strip(): v.strip() if v else "" for k, v in row.items()}
+            for row in reader
+            if any(v and v.strip() for v in row.values())  # skip blank rows
+        ]
+
+    if not rows:
+        raise ValueError(
+            f"Authoritative CSV '{path}' contains no data rows."
+        )
+
+    return rows
+
+
+def _authoritative_rows_to_identity_dicts(rows: list[dict]) -> list[dict]:
+    """
+    Normalise authoritative CSV rows into identity dicts compatible with
+    ``_build_account_csv``.
+
+    Performs case-insensitive column lookup so ``FirstName``, ``firstname``,
+    and ``FIRSTNAME`` all work.
+    """
+    def _get(row: dict, *keys: str) -> str:
+        """Case-insensitive key lookup across multiple candidate names."""
+        row_lower = {k.lower(): v for k, v in row.items()}
+        for key in keys:
+            val = row_lower.get(key.lower(), "")
+            if val:
+                return val
+        return ""
+
+    result = []
+    for row in rows:
+        first = _get(row, "firstName", "firstname")
+        last  = _get(row, "lastName",  "lastname")
+        full  = _get(row, "fullName",  "fullname")
+        email = _get(row, "email")
+
+        # Derive a stable alias: use email local-part, fall back to fullName
+        alias = email.split("@")[0] if email else (full.replace(" ", ".").lower() or "unknown")
+
+        result.append({
+            "id":        alias,
+            "alias":     alias,
+            "name":      full,
+            "firstName": first,
+            "lastName":  last,
+            "email":     email,
+        })
+    return result
 
 
 def _aliases_to_identity_dicts(aliases: list[str]) -> list[dict]:
@@ -456,6 +570,7 @@ def provision_sources(
     owner_name: str,
     exclude_alias: Optional[str] = None,
     users_file: Optional[str] = None,
+    authoritative: bool = False,
     dry_run: bool = False,
     force: bool = False,
 ) -> ProvisionSummary:
@@ -472,6 +587,14 @@ def provision_sources(
       uses those same users on every source, assigns all 4 entitlements to
       each user (in a random order per user).
 
+    When ``authoritative=True``:
+
+    - The source is created with ``authoritative=True``.
+    - ``users_file`` is **required** and must be a CSV with columns:
+      ``firstName``, ``lastName``, ``fullName``, ``email``.
+    - An identity profile is automatically created and linked to the source
+      after it is provisioned.
+
     Args:
         client:        Authenticated ISCClient.
         count:         Number of sources to create.
@@ -479,7 +602,11 @@ def provision_sources(
         owner_id:      Identity ID of the source owner.
         owner_name:    Display name of the source owner.
         exclude_alias: Alias to exclude from the random pool (random mode only).
-        users_file:    Path to a plain-text file of aliases (file mode).
+        users_file:    Path to a CSV file (authoritative mode) or plain-text
+                       aliases file (file mode).
+        authoritative: If True, create an authoritative source and identity
+                       profile.  Requires ``users_file`` to be a CSV with
+                       firstName, lastName, fullName, email columns.
         dry_run:       If True, generate CSVs and log but make no API calls.
         force:         If True, delete any existing source with the same name
                        before creating it.
@@ -489,9 +616,54 @@ def provision_sources(
     """
     summary = ProvisionSummary()
 
+    # --- Validate authoritative mode requirements ---
+    if authoritative and not users_file:
+        err = (
+            "--authoritative requires --users-file pointing to a CSV with "
+            "columns: firstName, lastName, fullName, email."
+        )
+        logger.error(err)
+        for i in range(1, count + 1):
+            summary.results.append(SourceProvisionResult(
+                name=f"{base_name} {i}", success=False, error=err
+            ))
+        return summary
+
+    if authoritative and count != 1:
+        err = (
+            "Authoritative mode only supports count=1. "
+            "An authoritative source represents a single system of record."
+        )
+        logger.error(err)
+        for i in range(1, count + 1):
+            summary.results.append(SourceProvisionResult(
+                name=f"{base_name} {i}", success=False, error=err
+            ))
+        return summary
+
     # --- Resolve the account list ---
-    if users_file:
-        # File mode — load aliases from file, same list used for every source
+    if users_file and authoritative:
+        # Authoritative mode — load structured CSV rows
+        try:
+            csv_rows = load_authoritative_csv(users_file)
+        except (FileNotFoundError, ValueError) as exc:
+            logger.error("%s", exc)
+            for i in range(1, count + 1):
+                summary.results.append(SourceProvisionResult(
+                    name=f"{base_name} {i}", success=False, error=str(exc)
+                ))
+            return summary
+
+        file_identities = _authoritative_rows_to_identity_dicts(csv_rows)
+        logger.info(
+            "Authoritative mode: %d user(s) loaded from '%s' — each will appear "
+            "on every source with all 4 entitlements assigned randomly.",
+            len(file_identities), users_file,
+        )
+        pool: Optional[list[dict]] = None
+
+    elif users_file:
+        # Regular file mode — plain-text aliases
         try:
             aliases = load_users_file(users_file)
         except (FileNotFoundError, ValueError) as exc:
@@ -508,7 +680,8 @@ def provision_sources(
             "with all 4 entitlements assigned randomly.",
             len(file_identities), users_file,
         )
-        pool: Optional[list[dict]] = None  # not used in file mode
+        pool = None
+
     else:
         # Random mode — fetch identity pool once, sample per source
         file_identities = []
@@ -538,10 +711,11 @@ def provision_sources(
         account_csv = _build_account_csv(sample, assignments)
 
         if dry_run:
-            logger.info("  [DRY RUN] Would create source '%s'", source_name)
+            logger.info("  [DRY RUN] Would create source '%s' (authoritative=%s)", source_name, authoritative)
             logger.info(
                 "  [DRY RUN] Mode: %s",
-                f"file ({len(sample)} users from '{users_file}')" if users_file
+                f"authoritative CSV ({len(sample)} users from '{users_file}')" if authoritative
+                else f"file ({len(sample)} users from '{users_file}')" if users_file
                 else f"random ({len(sample)} sampled from pool)",
             )
             logger.info("  [DRY RUN] Account CSV (%d bytes):", len(account_csv))
@@ -551,6 +725,11 @@ def provision_sources(
             logger.info("  [DRY RUN] Entitlement CSV (%d bytes):", len(dry_ent_csv))
             for line in dry_ent_csv.decode().splitlines():
                 logger.info("    %s", line)
+            if authoritative:
+                logger.info(
+                    "  [DRY RUN] Would create identity profile '%s' linked to source",
+                    source_name,
+                )
             summary.results.append(SourceProvisionResult(
                 name=source_name,
                 success=True,
@@ -572,14 +751,14 @@ def provision_sources(
             "connector": "delimited-file-angularsc",
             "connectorName": "Delimited File",
             "connectionType": "file",
-            "authoritative": False,
+            "authoritative": authoritative,
             "deleteThreshold": 10,
         }
 
         try:
             created = client.create_source(source_payload, provision_as_csv=True)
             source_id = created["id"]
-            logger.info("  ✓ Source created  id=%s", source_id)
+            logger.info("  ✓ Source created  id=%s  authoritative=%s", source_id, authoritative)
         except ISCAPIError as exc:
             detail = exc.detail()
             if "already exists" in detail.lower():
@@ -599,6 +778,35 @@ def provision_sources(
         # Brief pause — let ISC finish initialising the new source
         time.sleep(2)
 
+        # --- Step 2 (authoritative only): Create identity profile ---
+        if authoritative:
+            try:
+                profile = client.create_identity_profile(
+                    name=source_name,
+                    authoritative_source_id=source_id,
+                    authoritative_source_name=source_name,
+                    owner_id=owner_id,
+                    owner_name=owner_name,
+                )
+                logger.info(
+                    "  ✓ Identity profile created  id=%s",
+                    profile.get("id", "<unknown>"),
+                )
+            except ISCAPIError as exc:
+                logger.error("  ✗ Identity profile creation failed: %s", exc.detail())
+                summary.results.append(SourceProvisionResult(
+                    name=source_name, success=False, source_id=source_id,
+                    error=f"Identity profile creation failed: {exc.detail()}",
+                ))
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.error("  ✗ Identity profile creation error: %s", exc)
+                summary.results.append(SourceProvisionResult(
+                    name=source_name, success=False, source_id=source_id,
+                    error=f"Identity profile creation error: {exc}",
+                ))
+                continue
+
         # --- Discover schemas ---
         account_columns = _get_account_schema_columns(client, source_id)
         entitlement_columns = _get_entitlement_schema_columns(client, source_id)
@@ -607,7 +815,7 @@ def provision_sources(
         account_csv = _build_account_csv(sample, assignments, account_columns)
         source_entitlement_csv = _build_entitlement_csv(entitlement_columns)
 
-        # --- Step 2: Account aggregation ---
+        # --- Step 3: Account aggregation ---
         try:
             task = client.import_accounts(
                 source_id, account_csv,
@@ -632,7 +840,7 @@ def provision_sources(
             ))
             continue
 
-        # --- Step 3: Entitlement aggregation ---
+        # --- Step 4: Entitlement aggregation ---
         try:
             task = client.import_entitlements(
                 source_id, source_entitlement_csv,

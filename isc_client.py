@@ -501,6 +501,112 @@ class ISCClient:
         logger.debug("Listing identities (limit=%d, offset=%d)", limit, offset)
         return self._get("/identities", params=params)
 
+    # ------------------------------------------------------------------
+    # Identity Profiles API
+    # ------------------------------------------------------------------
+
+    def create_identity_profile(
+        self,
+        name: str,
+        authoritative_source_id: str,
+        authoritative_source_name: str,
+        owner_id: str,
+        owner_name: str,
+        attribute_transforms: Optional[list[dict]] = None,
+        priority: int = 25,
+    ) -> dict:
+        """
+        Create an identity profile tied to an authoritative source.
+
+        ``POST /v2024/identity-profiles``
+
+        The profile maps source account attributes to ISC identity attributes.
+        By default the following mappings are created (all via the
+        ``accountAttribute`` transform type):
+
+        ==================  ========================
+        Identity attribute  Source account attribute
+        ==================  ========================
+        firstname           givenName
+        lastname            familyName
+        displayName         name
+        email               e-mail
+        ==================  ========================
+
+        Callers can override ``attribute_transforms`` to supply a fully custom
+        list of ``{identityAttributeName, transformDefinition}`` objects.
+
+        Args:
+            name:                       Profile name (typically matches the
+                                        source name).
+            authoritative_source_id:    ID of the source this profile is
+                                        linked to.
+            authoritative_source_name:  Display name of the source.
+            owner_id:                   Identity ID of the profile owner.
+            owner_name:                 Display name of the profile owner.
+            attribute_transforms:       Optional list of attribute-transform
+                                        objects.  Defaults to the four standard
+                                        mappings described above.
+            priority:                   Profile priority (default 25).
+
+        Returns:
+            The created identity profile object returned by the API.
+        """
+        if attribute_transforms is None:
+            # Standard four-field mapping for a Delimited File authoritative source
+            _field_map = [
+                ("firstname",    "givenName"),
+                ("lastname",     "familyName"),
+                ("displayName",  "name"),
+                ("email",        "e-mail"),
+            ]
+            attribute_transforms = [
+                {
+                    "identityAttributeName": identity_attr,
+                    "transformDefinition": {
+                        "type": "accountAttribute",
+                        "attributes": {
+                            "attributeName": source_attr,
+                            "sourceName": authoritative_source_name,
+                            "sourceId": authoritative_source_id,
+                        },
+                    },
+                }
+                for identity_attr, source_attr in _field_map
+            ]
+
+        payload: dict = {
+            "name": name,
+            "owner": {
+                "type": "IDENTITY",
+                "id": owner_id,
+                "name": owner_name,
+            },
+            "priority": priority,
+            "authoritativeSource": {
+                "type": "SOURCE",
+                "id": authoritative_source_id,
+                "name": authoritative_source_name,
+            },
+            "identityRefreshRequired": True,
+            "identityAttributeConfig": {
+                "enabled": True,
+                "attributeTransforms": attribute_transforms,
+            },
+        }
+
+        logger.debug(
+            "Creating identity profile '%s' for source '%s'",
+            name, authoritative_source_name,
+        )
+        # Identity Profiles lives under /v2024, not /v3
+        url = f"{self._base_url}/v2024/identity-profiles"
+        response = self._session.post(
+            url, headers=self._auth_headers(), json=payload
+        )
+        self._raise_for_status(response)
+        return response.json()
+
     def list_source_schemas(self, source_id: str) -> list[dict]:
         """
         List schemas defined on a source.
