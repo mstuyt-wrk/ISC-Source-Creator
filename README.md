@@ -58,6 +58,8 @@ source .venv/bin/activate        # macOS / Linux
 pip install -r requirements.txt
 ```
 
+> The `.venv` directory is machine-specific and should not be copied between machines. On each new machine, recreate it with the two commands above. If you see `ModuleNotFoundError`, the most likely cause is that the venv isn't activated — run `source .venv/bin/activate` first.
+
 ## Configuration
 
 Copy the example env file and fill in your credentials:
