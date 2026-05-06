@@ -47,7 +47,7 @@ sailpoint-source-creator/
 ## Setup
 
 ```bash
-cd sailpoint-source-creator
+cd ISC-Source-Creator
 
 # Create and activate a virtual environment
 python -m venv .venv
