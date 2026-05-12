@@ -373,6 +373,58 @@ class ISCClient:
     # Identities API  (used to look up valid owner IDs)
     # ------------------------------------------------------------------
 
+    def find_identity_by_alias(self, alias: str) -> Optional[dict]:
+        """
+        Look up a single identity by its alias (username).
+
+        Tries two strategies in order:
+
+        1. ``GET /v3/identities`` with ``filters=alias eq "<alias>"`` — fast
+           exact match.
+        2. ``POST /v3/search`` (Elasticsearch) — broader fallback for tenants
+           where the filter endpoint doesn't support alias equality.
+
+        Args:
+            alias: The identity alias / username to search for.
+
+        Returns:
+            The identity dict if found, or ``None`` if no match.
+        """
+        # Strategy 1: filter endpoint — exact alias match
+        try:
+            results = self._get(
+                "/identities",
+                params={"filters": f'alias eq "{alias}"', "limit": 1},
+            )
+            if results:
+                logger.debug("Resolved alias '%s' via filter endpoint", alias)
+                return results[0]
+        except ISCAPIError as exc:
+            logger.debug("Filter-based alias lookup failed (%s), trying Search API", exc.status_code)
+
+        # Strategy 2: Search API fallback
+        try:
+            body = {
+                "indices": ["identities"],
+                "query": {"query": alias},
+                "sort": ["name"],
+            }
+            response = self._session.post(
+                f"{self._base_url}/v3/search",
+                headers=self._auth_headers(),
+                json=body,
+                params={"limit": 1, "offset": 0},
+            )
+            self._raise_for_status(response)
+            hits = response.json()
+            if isinstance(hits, list) and hits:
+                logger.debug("Resolved alias '%s' via Search API", alias)
+                return hits[0]
+        except ISCAPIError as exc:
+            logger.debug("Search API alias lookup failed: %s", exc.detail())
+
+        return None
+
     def search_identities(
         self,
         query: str,

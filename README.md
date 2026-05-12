@@ -8,11 +8,12 @@ A Python CLI tool for creating and managing sources in **SailPoint Identity Secu
 |---|---|
 | **Provision** | Create N Delimited File sources, auto-populate with real tenant identities, and aggregate account + entitlement data in one command |
 | **Authoritative sources** | Provision sources as authoritative and automatically create a linked identity profile with attribute mappings |
+| **Owner by alias** | Supply an identity alias instead of an ID — the tool resolves it automatically |
 | **Create** | Bulk-create sources from a JSON definition file |
 | **List** | List sources with filtering, sorting, and auto-pagination |
 | **Get** | Fetch a single source by ID |
 | **Delete** | Delete a source (with confirmation prompt) |
-| **Find owner** | Search tenant identities to find a valid owner ID |
+| **Find owner** | Search tenant identities to find a valid owner ID or alias |
 | **List connectors** | List all connectors available on the tenant |
 | **Dry-run** | Validate or preview any operation without touching the API |
 | **JSON output** | `--output json` on every command for scripting |
@@ -32,7 +33,8 @@ sailpoint-source-creator/
 ├── requirements-dev.txt # Dev/test dependencies
 ├── .env.example         # Environment variable template
 ├── examples/
-│   └── sources.json           # Template for the create command
+│   ├── sources.json           # Template for the create command
+│   └── employees.csv          # Sample authoritative CSV
 └── tests/
     ├── test_isc_client.py     # Unit tests for the API client
     ├── test_source_creator.py # Unit tests for validation & creation
@@ -138,7 +140,7 @@ There are three account population modes:
 |---|---|---|
 | **Random** (default) | _(no flag)_ | Fetches up to 250 tenant identities, randomly samples 10 per source, assigns 1–3 entitlements to each |
 | **File** | `--users-file PATH` | Reads aliases from a plain-text file — those users appear on **every** source, each receiving all 4 entitlements in a random order |
-| **Authoritative** | `--authoritative --users-file PATH` | Same as file mode but sources are marked authoritative and an identity profile is created for each one. The file must be a CSV with identity fields (see below). |
+| **Authoritative** | `--authoritative --users-file PATH` | Sources are marked authoritative and an identity profile is created automatically. The file must be a CSV with identity fields (see below). Limited to a single source (`--count 1`). |
 
 #### Entitlement catalogue
 
@@ -161,21 +163,38 @@ All modes use the same four entitlements:
 
 In authoritative mode, an additional step runs between source creation and aggregation:
 
-- Creates an **identity profile** linked to the source, with attribute transforms mapping `firstName → firstname`, `lastName → lastname`, `fullName → displayName`, and `email → email`
+- Creates an **identity profile** linked to the source, with attribute transforms mapping source account columns to ISC identity attributes (see [Identity profile attribute mappings](#identity-profile-attribute-mappings))
+- Profile priority is resolved automatically — the tool queries existing profiles and assigns the next available value
 
 ---
 
-#### Step 1 — Find a valid owner ID
+#### Step 1 — Identify the source owner
 
-Every source requires an `owner.id` that references a real identity in your tenant:
+Every source requires an owner that references a real identity in your tenant. You can supply the owner in two ways:
+
+**Option A — by alias (recommended):** pass `--owner-alias` with the identity's username. The tool resolves the ID automatically using an exact alias lookup, with a Search API fallback.
 
 ```bash
-# Search by name fragment
-python main.py find-owner "jane"
-
-# List the first 10 identities
-python main.py find-owner "*"
+python main.py provision \
+  --count 5 \
+  --name "Demo Source" \
+  --owner-alias jsmith
 ```
+
+**Option B — by ID:** pass `--owner-id` with the full identity ID. Use `find-owner` to look it up first if needed.
+
+```bash
+# Search by name or alias fragment
+python main.py find-owner "jane"
+python main.py find-owner "*"   # list first 10 identities
+
+python main.py provision \
+  --count 5 \
+  --name "Demo Source" \
+  --owner-id 2c9180a46f3b1234567890abcdef1234
+```
+
+Exactly one of `--owner-alias` or `--owner-id` is required. Supplying both is an error.
 
 ---
 
@@ -187,7 +206,7 @@ python main.py find-owner "*"
 python main.py provision \
   --count 5 \
   --name "Demo Source" \
-  --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --owner-alias spadmin \
   --exclude-alias spadmin
 ```
 
@@ -209,13 +228,15 @@ Then run:
 python main.py provision \
   --count 5 \
   --name "Demo Source" \
-  --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --owner-alias jsmith \
   --users-file users.txt
 ```
 
-**Authoritative mode** — creates authoritative sources with a linked identity profile:
+This creates **Demo Source 1** through **Demo Source 5**. All five sources contain the same users, each with all 4 entitlements assigned in a random order per user.
 
-First create a `employees.csv` file with the required columns:
+**Authoritative mode** — creates a single authoritative source with a linked identity profile:
+
+First create an `employees.csv` file with the required columns:
 
 ```csv
 firstName,lastName,fullName,email
@@ -228,14 +249,12 @@ Then run:
 
 ```bash
 python main.py provision \
-  --count 3 \
+  --count 1 \
   --name "HR Source" \
-  --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --owner-alias jsmith \
   --users-file employees.csv \
   --authoritative
 ```
-
-This creates **HR Source 1** through **HR Source 3**, each marked as authoritative, with an identity profile automatically created and linked to each source.
 
 ---
 
@@ -254,46 +273,51 @@ Column headers are case-insensitive (`FIRSTNAME`, `firstname`, and `firstName` a
 
 The account alias is derived from the email local-part (the part before `@`). For example, `jane.doe@acme.com` becomes the alias `jane.doe`.
 
+A sample file is provided at `examples/employees.csv`.
+
 #### Identity profile attribute mappings
 
 The identity profile created in authoritative mode maps source account attributes to ISC identity attributes as follows:
 
-| ISC identity attribute | Source account attribute |
-|---|---|
-| `uid` | `name` (populated from CSV `fullName`) |
-| `firstname` | `givenName` (populated from CSV `firstName`) |
-| `lastname` | `familyName` (populated from CSV `lastName`) |
-| `displayName` | `name` (populated from CSV `fullName`) |
-| `email` | `e-mail` (populated from CSV `email`) |
+| ISC identity attribute | Source account attribute | Populated from CSV column |
+|---|---|---|
+| `uid` | `name` | `fullName` |
+| `firstname` | `givenName` | `firstName` |
+| `lastname` | `familyName` | `lastName` |
+| `displayName` | `name` | `fullName` |
+| `email` | `e-mail` | `email` |
+
+The profile priority is set automatically to one higher than the current maximum across all existing identity profiles on the tenant.
 
 ---
 
 #### Provision options
 
-| Flag | Required | Description |
-|---|---|---|
-| `--count N` | Yes | Number of sources to create |
-| `--name BASE_NAME` | Yes | Name prefix — sources are named `<BASE_NAME> 1`, `<BASE_NAME> 2`, etc. |
-| `--owner-id ID` | Yes | Identity ID of the source owner (use `find-owner` to look this up) |
-| `--owner-name NAME` | No | Display name of the owner (looked up automatically if omitted) |
-| `--users-file PATH` | No* | Path to a users file. Plain-text aliases for file mode; CSV with identity fields for authoritative mode. *Required when `--authoritative` is set. |
-| `--authoritative` | No | Create authoritative sources and generate an identity profile for each one. Requires `--users-file` to be a CSV with `firstName`, `lastName`, `fullName`, `email` columns. Requires `ORG_ADMIN`. |
-| `--exclude-alias ALIAS` | No | Alias to exclude from the random pool (random mode only, ignored in file/authoritative mode) |
-| `--force` | No | Delete any existing source with the same name before creating — use this to re-run with the same `--name` |
-| `--dry-run` | No | Preview CSVs and log what would happen without making any API calls |
-| `--output json` | No | Output results as JSON |
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--count N` | Yes | — | Number of sources to create. Must be `1` when `--authoritative` is set. |
+| `--name BASE_NAME` | Yes | — | Name prefix — sources are named `<BASE_NAME> 1`, `<BASE_NAME> 2`, etc. |
+| `--owner-alias ALIAS` | One of | — | Alias (username) of the source owner — ID is resolved automatically. |
+| `--owner-id ID` | One of | — | Identity ID of the source owner. Use `find-owner` to look this up. |
+| `--owner-name NAME` | No | auto | Display name of the owner (resolved automatically if omitted). |
+| `--users-file PATH` | No* | — | Users file. Plain-text aliases for file mode; CSV with identity fields for authoritative mode. *Required when `--authoritative` is set. |
+| `--authoritative` | No | false | Create an authoritative source and generate a linked identity profile. Requires `--users-file` (CSV) and `--count 1`. Requires `ORG_ADMIN`. |
+| `--exclude-alias ALIAS` | No | — | Alias to exclude from the random identity pool (random mode only). |
+| `--force` | No | false | Delete any existing source with the same name before creating. |
+| `--dry-run` | No | false | Preview CSVs and log what would happen without making any API calls. |
+| `--output json` | No | table | Output results as JSON instead of a table. |
 
 ---
 
 #### Re-running with the same name
 
-If sources with the same name already exist on the tenant, the create step will fail with a conflict error. Use `--force` to delete and recreate them:
+If a source with the same name already exists on the tenant, the create step will fail with a conflict error. Use `--force` to delete and recreate it:
 
 ```bash
 python main.py provision \
-  --count 5 \
+  --count 1 \
   --name "HR Source" \
-  --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --owner-alias jsmith \
   --users-file employees.csv \
   --authoritative \
   --force
@@ -307,9 +331,9 @@ Preview exactly what would be created and what the CSVs would contain, without t
 
 ```bash
 python main.py provision \
-  --count 2 \
-  --name "Test" \
-  --owner-id 2c9180a46f3b1234567890abcdef1234 \
+  --count 1 \
+  --name "HR Source" \
+  --owner-alias jsmith \
   --users-file employees.csv \
   --authoritative \
   --dry-run
@@ -320,43 +344,31 @@ python main.py provision \
 #### Example output (authoritative mode)
 
 ```
+Resolved alias 'jsmith' → id=2c9180a46f3b1234567890abcdef1234 name=John Smith
 ────────────────────────────────────────────────────────────
-Provisioning source 1/3: HR Source 1
+Provisioning source 1/1: HR Source 1
   ✓ Source created  id=34db381d97944bdc89fa3eed326f6f1  authoritative=True
   ✓ Identity profile created  id=7ac2190f3e8b4d12a09f1cc234de5678
   ✓ Account aggregation started  task=task-acct-001
   ✓ Entitlement aggregation started  task=task-ent-001
-────────────────────────────────────────────────────────────
-Provisioning source 2/3: HR Source 2
-  ✓ Source created  id=f4bd61c6ad7b49e68da22c9fde4f47b1  authoritative=True
-  ✓ Identity profile created  id=9de3401a2f7c5e23b10g2dd345ef6789
-  ✓ Account aggregation started  task=task-acct-002
-  ✓ Entitlement aggregation started  task=task-ent-002
-...
 
 ======================================================================
-  Provision Summary: 3/3 sources fully provisioned
+  Provision Summary: 1/1 sources fully provisioned
 ======================================================================
 
 ✓ Provisioned successfully:
     HR Source 1                               id=34db381d97944bdc89fa3eed326f6f1  accounts=3  entitlements=4
-    HR Source 2                               id=f4bd61c6ad7b49e68da22c9fde4f47b1  accounts=3  entitlements=4
-    HR Source 3                               id=3e42d84d94dd4303a77ad7211bed01a1  accounts=3  entitlements=4
 ```
 
 #### Example output (random / file mode)
 
 ```
+Resolved alias 'jsmith' → id=2c9180a46f3b1234567890abcdef1234 name=John Smith
 ────────────────────────────────────────────────────────────
 Provisioning source 1/5: Demo Source 1
   ✓ Source created  id=34db381d97944bdc89fa3eed326f6f1  authoritative=False
   ✓ Account aggregation started  task=task-acct-001
   ✓ Entitlement aggregation started  task=task-ent-001
-────────────────────────────────────────────────────────────
-Provisioning source 2/5: Demo Source 2
-  ✓ Source created  id=f4bd61c6ad7b49e68da22c9fde4f47b1  authoritative=False
-  ✓ Account aggregation started  task=task-acct-002
-  ✓ Entitlement aggregation started  task=task-ent-002
 ...
 
 ======================================================================
@@ -461,7 +473,7 @@ python main.py delete 2c9180835d191a86015d28455b4a2329 --yes
 
 ```bash
 # Enable DEBUG logging (shows every HTTP request URL and parameters)
-python main.py --verbose provision --count 1 --name "Test" --owner-id abc123
+python main.py --verbose provision --count 1 --name "Test" --owner-alias jsmith
 ```
 
 ---

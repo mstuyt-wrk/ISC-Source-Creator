@@ -128,6 +128,42 @@ def _print_sources_table(sources: list[dict]) -> None:
 
 def cmd_provision(args: argparse.Namespace, client: ISCClient) -> int:
     """Handle the 'provision' sub-command."""
+
+    # --- Validate that exactly one of --owner-id / --owner-alias is supplied ---
+    if not args.owner_id and not args.owner_alias:
+        logger.error("One of --owner-id or --owner-alias is required.")
+        return 1
+    if args.owner_id and args.owner_alias:
+        logger.error("Specify only one of --owner-id or --owner-alias, not both.")
+        return 1
+
+    # --- Resolve alias → ID if --owner-alias was supplied ---
+    if args.owner_alias:
+        logger.info("Resolving owner alias '%s'...", args.owner_alias)
+        try:
+            identity = client.find_identity_by_alias(args.owner_alias)
+        except ISCAPIError as exc:
+            logger.error("Failed to look up alias '%s': %s", args.owner_alias, exc.detail())
+            return 1
+        if not identity:
+            logger.error(
+                "No identity found for alias '%s'. "
+                "Use 'find-owner' to search for valid identities.",
+                args.owner_alias,
+            )
+            return 1
+        args.owner_id = identity["id"]
+        args.owner_name = (
+            args.owner_name
+            or identity.get("displayName")
+            or identity.get("name")
+            or args.owner_id
+        )
+        logger.info(
+            "Resolved alias '%s' → id=%s name=%s",
+            args.owner_alias, args.owner_id, args.owner_name,
+        )
+
     # Resolve owner name if not supplied — failure here is non-fatal,
     # we fall back to using the ID as the display name
     owner_name = args.owner_name
@@ -508,9 +544,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prov_p.add_argument(
         "--owner-id",
-        required=True,
+        default=None,
         metavar="IDENTITY_ID",
-        help="Identity ID of the source owner (use 'find-owner' to look this up).",
+        help="Identity ID of the source owner. Use this or --owner-alias.",
+    )
+    prov_p.add_argument(
+        "--owner-alias",
+        default=None,
+        metavar="ALIAS",
+        help=(
+            "Alias (username) of the source owner. "
+            "The tool will look up the corresponding identity ID automatically. "
+            "Use this or --owner-id."
+        ),
     )
     prov_p.add_argument(
         "--owner-name",

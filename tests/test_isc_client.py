@@ -370,5 +370,99 @@ class TestSourcesMethods(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
 
+# ---------------------------------------------------------------------------
+# find_identity_by_alias
+# ---------------------------------------------------------------------------
+
+
+class TestFindIdentityByAlias(unittest.TestCase):
+    def setUp(self):
+        self.client = _make_client()
+        self.client._access_token = "fake-jwt-token"
+        self.client._token_expires_at = time.monotonic() + 600
+
+    def _mock_get(self, return_value, status_code=200):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = return_value
+        return patch.object(self.client._session, "get", return_value=resp)
+
+    def _mock_post(self, return_value, status_code=200):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = return_value
+        return patch.object(self.client._session, "post", return_value=resp)
+
+    def test_returns_identity_when_filter_matches(self):
+        identity = {"id": "id-001", "alias": "jsmith", "displayName": "John Smith"}
+        with self._mock_get([identity]):
+            result = self.client.find_identity_by_alias("jsmith")
+        self.assertEqual(result["id"], "id-001")
+
+    def test_returns_none_when_not_found(self):
+        with self._mock_get([]):
+            with self._mock_post([]):
+                result = self.client.find_identity_by_alias("nobody")
+        self.assertIsNone(result)
+
+    def test_falls_back_to_search_api_when_filter_returns_empty(self):
+        identity = {"id": "id-002", "alias": "adoe", "displayName": "Alice Doe"}
+        get_resp = MagicMock()
+        get_resp.status_code = 200
+        get_resp.json.return_value = []  # filter returns nothing
+
+        post_resp = MagicMock()
+        post_resp.status_code = 200
+        post_resp.json.return_value = [identity]  # search API finds it
+
+        with patch.object(self.client._session, "get", return_value=get_resp):
+            with patch.object(self.client._session, "post", return_value=post_resp):
+                result = self.client.find_identity_by_alias("adoe")
+        self.assertEqual(result["id"], "id-002")
+
+    def test_falls_back_to_search_api_when_filter_raises(self):
+        identity = {"id": "id-003", "alias": "bjones"}
+        get_resp = MagicMock()
+        get_resp.status_code = 400
+        get_resp.url = "https://test-tenant.api.identitynow.com/v3/identities"
+        get_resp.json.return_value = {"message": "Filter not supported"}
+
+        post_resp = MagicMock()
+        post_resp.status_code = 200
+        post_resp.json.return_value = [identity]
+
+        with patch.object(self.client._session, "get", return_value=get_resp):
+            with patch.object(self.client._session, "post", return_value=post_resp):
+                result = self.client.find_identity_by_alias("bjones")
+        self.assertEqual(result["id"], "id-003")
+
+    def test_returns_none_when_both_strategies_fail(self):
+        get_resp = MagicMock()
+        get_resp.status_code = 400
+        get_resp.url = "https://test-tenant.api.identitynow.com/v3/identities"
+        get_resp.json.return_value = {"message": "error"}
+
+        post_resp = MagicMock()
+        post_resp.status_code = 400
+        post_resp.url = "https://test-tenant.api.identitynow.com/v3/search"
+        post_resp.json.return_value = {"message": "error"}
+
+        with patch.object(self.client._session, "get", return_value=get_resp):
+            with patch.object(self.client._session, "post", return_value=post_resp):
+                result = self.client.find_identity_by_alias("ghost")
+        self.assertIsNone(result)
+
+    def test_filter_uses_exact_alias_eq(self):
+        """The filter endpoint must use 'alias eq' for an exact match."""
+        with patch.object(self.client._session, "get") as mock_get:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = [{"id": "id-001", "alias": "jsmith"}]
+            mock_get.return_value = resp
+            self.client.find_identity_by_alias("jsmith")
+            params = mock_get.call_args.kwargs.get("params", {})
+        self.assertIn('alias eq "jsmith"', params.get("filters", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
