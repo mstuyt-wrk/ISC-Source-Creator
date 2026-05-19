@@ -45,7 +45,7 @@ sailpoint-source-creator/
 
 - Python 3.10+
 - A SailPoint ISC tenant (production or demo)
-- A **Personal Access Token (PAT)** or OAuth API client with `ORG_ADMIN` or `SOURCE_ADMIN` authority
+- A **Personal Access Token (PAT)** or OAuth API client with `sp:scopes:all`
 
 > Creating authoritative sources and identity profiles requires `ORG_ADMIN` authority.
 
@@ -55,7 +55,7 @@ sailpoint-source-creator/
 cd ISC-Source-Creator
 
 # Create and activate a virtual environment
-python -m venv .venv
+python -m venv .venv             # macOS may be python3
 source .venv/bin/activate        # macOS / Linux
 # .venv\Scripts\activate         # Windows
 
